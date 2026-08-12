@@ -1,14 +1,15 @@
 ```bash
 
 python -c "
-import numpy as np, pickle
-from csvio import load_returns
-m = pickle.load(open('runs/main/marginals.pkl','rb'))
-r = load_returns('data/returns.csv', False)
-z = m.transform(r[:int(0.8*len(r))])
-print('non-finite z:', int((~np.isfinite(z)).sum()), ' max |z|:', np.abs(z[np.isfinite(z)]).max())
-bad = np.argwhere(~np.isfinite(z))
-print('rows/cols:', bad[:10])
+import torch
+from tailfm import sample_base
+for nu in (2.5, 3.0, 4.0):
+    m = 0.0; bad = 0
+    for _ in range(200):
+        x = sample_base(128, 24, 251, nu, mix_dim='window', device='cpu')
+        m = max(m, x.abs().max().item()); bad += int((~torch.isfinite(x)).sum())
+    print(f'nu={nu}: max|x0| over 25600 draws = {m:.4g}, non-finite {bad}')
 "
+
 
 ```
