@@ -91,7 +91,7 @@ python drop_valors.py --data data/returns.csv --out data/returns_clean.csv --val
 ## 5. Fit the model
 
 ```bash
-python fit_returns.py --data data/returns.csv --n 24 --test-frac 0.2 --horizon 10 --seed 0 --steps 20000 --gen 50000 --outdir runs/main
+python fit_returns.py --data data/returns_clean.csv --q-tail auto --n 24 --test-frac 0.2 --horizon 10 --seed 0 --steps 20000 --gen 50000 --d-model 512 --outdir runs/auto
 ```
 
 ```bash
