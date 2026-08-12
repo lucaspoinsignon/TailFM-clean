@@ -83,6 +83,11 @@ python -m evtdiag.hill --data data/returns.csv --out fig/hill.png
 
 ```
 
+## Remove valors
+```bash
+python drop_valors.py --data data/returns.csv --out data/returns_clean.csv --valors 4155686,4155690,4157124
+```
+
 ## 5. Fit the model
 
 ```bash
