@@ -75,6 +75,13 @@ Rank correlation, eigenvalue spectrum with effective rank, distribution of
 ```bash
 python 04_analyse.py --data data/returns.csv --out fig/dependence.png
 ```
+## Analyze marginals
+
+```bash
+python -m evtdiag.ks   --data data/returns.csv --out fig/ks.png
+python -m evtdiag.hill --data data/returns.csv --out fig/hill.png
+
+```
 
 ## 5. Fit the model
 
