@@ -59,6 +59,8 @@ def main():
     p.add_argument("--q-tail", default="0.05",
                    help="float, or 'auto'")
     p.add_argument("--nu", type=float, default=None, help="default: Hill median")
+    p.add_argument("--n-boot", type=int, default=99,
+                   help="bootstrap replicates for the --q-tail auto GoF test")
     p.add_argument("--test-frac", type=float, default=0.2)
     p.add_argument("--out", default="fig/ks.png")
     p.add_argument("--top", type=int, default=20)
@@ -78,8 +80,8 @@ def main():
         print(f"loaded {a.marginals}  (nu={marg.nu_:.3f}, q_tail={marg.q_tail})")
     else:
         qt = a.q_tail if a.q_tail == "auto" else float(a.q_tail)
-        marg = MarginalEnsemble(q_tail=qt,
-                                nu=a.nu if a.nu else "auto").fit(tr)
+        marg = MarginalEnsemble(q_tail=qt, nu=a.nu if a.nu else "auto",
+                                n_boot=a.n_boot).fit(tr)
         print(f"fitted marginals on train rows (nu={marg.nu_:.3f}, q_tail={a.q_tail})")
 
     rows = []
@@ -94,6 +96,8 @@ def main():
             KS_train=ks_tr.statistic, p_train=ks_tr.pvalue,
             KS_test=ks_te.statistic, p_test=ks_te.pvalue,
             AD_train=ad_stat(u_tr), AD_test=ad_stat(u_te),
+            q_lo=m.q_lo_, q_hi=m.q_hi_,
+            n_exc_lo=m.n_exc_lo_, n_exc_hi=m.n_exc_hi_,
             max_abs_z=max(np.abs(z_tr).max(), np.abs(z_te).max()),
             n_beyond=int((te[:, j] < tr[:, j].min()).sum()
                          + (te[:, j] > tr[:, j].max()).sum()),
