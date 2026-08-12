@@ -61,14 +61,18 @@ def main():
     p.add_argument("--data", required=True)
     p.add_argument("--prices", action="store_true",
                    help="--data holds prices, not returns (same flag as fit_returns)")
-    p.add_argument("--q-tail", type=float, default=0.05,
-                   help="must match fit_returns.py --q-tail")
+    p.add_argument("--q-tail", default="0.05",
+                   help="float, or 'auto' for per-feature threshold selection; "
+                        "must match fit_returns.py --q-tail")
+    p.add_argument("--n-boot", type=int, default=99,
+                   help="bootstrap replicates for the auto goodness-of-fit test")
     p.add_argument("--test-frac", type=float, default=0.2)
     p.add_argument("--min-exceedances", type=int, default=30)
     p.add_argument("--no-fit", action="store_true",
                    help="skip the actual genpareto fits (structure checks only)")
     a = p.parse_args()
-    print(f"checking {a.data}  (--prices={a.prices}, q_tail={a.q_tail})\n")
+    q_tail = a.q_tail if a.q_tail == "auto" else float(a.q_tail)
+    print(f"checking {a.data}  (--prices={a.prices}, q_tail={q_tail})\n")
 
     # ---- header -------------------------------------------------------------
     # Load the raw columns first (prices=False never takes a log), so a
@@ -123,62 +127,63 @@ def main():
              "this file is probably price levels -- add --prices.")
 
     tr = r[:int((1.0 - a.test_frac) * T)]
-    ok(f"training rows {tr.shape[0]}  ->  {int(a.q_tail * tr.shape[0])} "
-       f"exceedances per tail per column")
-
-    # ---- EVT ---------------------------------------------------------------
-    print("\nEVT feasibility (on the training rows, as fit_returns sees them)")
-    u_lo = np.quantile(tr, a.q_tail, axis=0)
-    u_hi = np.quantile(tr, 1.0 - a.q_tail, axis=0)
-    n_lo = (tr < u_lo).sum(axis=0)
-    n_hi = (tr > u_hi).sum(axis=0)
-    empty = np.flatnonzero((n_lo == 0) | (n_hi == 0))
-    thin = np.flatnonzero(((n_lo < a.min_exceedances) | (n_hi < a.min_exceedances))
-                          & ~np.isin(np.arange(f), empty))
-    if empty.size:
-        fail(f"{empty.size} columns have an EMPTY exceedance set -- "
-             f"genpareto.fit will raise: {[names[j] for j in empty[:6]]}")
+    if q_tail == "auto":
+        ok(f"training rows {tr.shape[0]}  ->  threshold chosen per feature and tail")
     else:
-        ok(f"every column has >=1 exceedance per tail "
-           f"(min lower {n_lo.min()}, min upper {n_hi.min()})")
-    if thin.size:
-        warn(f"{thin.size} columns have <{a.min_exceedances} exceedances in a "
-             f"tail; the GPD fit will be unstable: {[names[j] for j in thin[:6]]}")
+        ok(f"training rows {tr.shape[0]}  ->  {int(q_tail * tr.shape[0])} "
+           f"exceedances per tail per column")
 
-    nuniq = np.array([len(np.unique(tr[:, j])) for j in range(f)])
-    coarse = np.flatnonzero(nuniq < 0.5 * tr.shape[0])
-    if coarse.size:
-        warn(f"{coarse.size} columns have <50% distinct return values "
-             f"(quantised/stale): {[names[j] for j in coarse[:6]]}")
+    # ---- EVT ----------------------------------------------------------------
+    # Fit the marginals for real, on the training rows, exactly as fit_returns
+    # does.  Inferring feasibility from exceedance counts is not enough: the fit
+    # can succeed and still transform an observation to |z| ~ 1e4, which is what
+    # destroys training, and only fitting reveals it.
+    print("\nEVT: fitting marginals on the training rows")
+    from tailfm.evt import MarginalEnsemble
+    try:
+        marg = MarginalEnsemble(q_tail=q_tail, nu="auto",
+                                n_boot=a.n_boot).fit(tr)
+    except ValueError as e:
+        fail(str(e))
+        print(f"\n{'-' * 60}\nFAILED: fit_returns.py will raise on this file.")
+        sys.exit(1)
+    su = marg.summary()
+    ok(f"{2 * f} GPD fits succeeded  (nu = {marg.nu_:.3f})")
 
-    if not a.no_fit and not empty.size:
-        print("\nrunning the actual GPD fits")
-        xi_lo, xi_hi, errs = [], [], []
-        for j in range(f):
-            for side, thr, sgn in ((xi_lo, u_lo[j], -1.0), (xi_hi, u_hi[j], 1.0)):
-                exc = sgn * (tr[:, j] - thr)
-                exc = exc[exc > 0]
-                try:
-                    side.append(stats.genpareto.fit(exc, floc=0.0)[0])
-                except Exception as e:
-                    errs.append(f"{names[j]}: {type(e).__name__}: {e}")
-                    side.append(np.nan)
-        if errs:
-            fail(f"{len(errs)} GPD fits raised, e.g. {errs[0]}")
-        else:
-            ok(f"{2 * f} GPD fits succeeded")
-        xi_lo, xi_hi = np.array(xi_lo), np.array(xi_hi)
-        for nm, xi in (("lower", xi_lo), ("upper", xi_hi)):
-            print(f"    xi_{nm}: median {np.nanmedian(xi):+.3f}  "
-                  f"[{np.nanmin(xi):+.3f}, {np.nanmax(xi):+.3f}]  "
-                  f"| xi>0.5: {int((xi > 0.5).sum())}  xi<0: {int((xi < 0).sum())}")
-        if (xi_lo > 0.5).any():
-            warn(f"{int((xi_lo > 0.5).sum())} columns with xi_lower > 0.5 "
-                 "(infinite variance) -- check the data or raise --q-tail")
-        if (xi_lo < -0.1).any():
-            warn(f"{int((xi_lo < -0.1).sum())} columns with xi_lower < -0.1: the "
-                 "fitted GPD has a finite left endpoint, i.e. a hard floor on "
-                 "losses.  Usually smoothed or appraisal-based pricing.")
+    if q_tail == "auto":
+        for side in ("lo", "hi"):
+            qv, cnt = np.unique(su[f"q_{side}"], return_counts=True)
+            print(f"    q_{side} selected: "
+                  + "  ".join(f"{v:.2f}x{c}" for v, c in zip(qv, cnt)))
+        nfail = int((~su["gof_ok_lo"]).sum() + (~su["gof_ok_hi"]).sum())
+        if nfail:
+            warn(f"{nfail} tails where no threshold passed the AD test; the "
+                 "best-fitting q was used and those marginals are suspect")
+    print(f"    exceedances: lower {su['n_exc_lo'].min()}-{su['n_exc_lo'].max()}, "
+          f"upper {su['n_exc_hi'].min()}-{su['n_exc_hi'].max()}")
+    for side, xi in (("lower", su["xi_lo"]), ("upper", su["xi_hi"])):
+        print(f"    xi_{side}: median {np.median(xi):+.3f}  "
+              f"[{xi.min():+.3f}, {xi.max():+.3f}]  "
+              f"| xi>1: {int((xi > 1).sum())}  xi<0: {int((xi < 0).sum())}")
+
+    # ---- the operational check ----------------------------------------------
+    z = marg.transform(tr)
+    mz = np.abs(z).max(axis=0)
+    if not np.isfinite(z).all():
+        fail(f"{int((~np.isfinite(z)).sum())} non-finite values after the PIT")
+    bad = np.flatnonzero(mz > 100.0)
+    if bad.size:
+        fail(f"{bad.size} features transform to |z| > 100.  A correct fit keeps "
+             f"max|z| under ~100 at any tail index (p99 = 44 in simulation), so "
+             f"these marginals are mis-fitted and will dominate the training "
+             f"gradient: "
+             + ", ".join(f"{names[j]}({mz[j]:.0f})" for j in bad[:6]))
+    else:
+        ok(f"max|z| = {mz.max():.1f} over all features (correct fits stay under ~100)")
+    warnz = np.flatnonzero((mz > 50.0) & (mz <= 100.0))
+    if warnz.size:
+        warn(f"{warnz.size} features with 50 < max|z| <= 100: plausible but on the "
+             "edge of what a correct fit produces")
 
     print(f"\n{'-' * 60}")
     if FAIL:
