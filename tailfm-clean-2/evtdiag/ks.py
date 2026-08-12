@@ -56,7 +56,8 @@ def main():
     p.add_argument("--prices", action="store_true")
     p.add_argument("--marginals", default=None,
                    help="reuse a fitted marginals.pkl instead of refitting")
-    p.add_argument("--q-tail", type=float, default=0.05)
+    p.add_argument("--q-tail", default="0.05",
+                   help="float, or 'auto'")
     p.add_argument("--nu", type=float, default=None, help="default: Hill median")
     p.add_argument("--test-frac", type=float, default=0.2)
     p.add_argument("--out", default="fig/ks.png")
@@ -76,7 +77,8 @@ def main():
         marg = pickle.load(open(a.marginals, "rb"))
         print(f"loaded {a.marginals}  (nu={marg.nu_:.3f}, q_tail={marg.q_tail})")
     else:
-        marg = MarginalEnsemble(q_tail=a.q_tail,
+        qt = a.q_tail if a.q_tail == "auto" else float(a.q_tail)
+        marg = MarginalEnsemble(q_tail=qt,
                                 nu=a.nu if a.nu else "auto").fit(tr)
         print(f"fitted marginals on train rows (nu={marg.nu_:.3f}, q_tail={a.q_tail})")
 
