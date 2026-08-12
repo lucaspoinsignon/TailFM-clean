@@ -17,6 +17,20 @@ Diagnostics (all computed on both real and generated samples, pooled over window
   * Marginal VaR/CVaR (loss = -x, per feature, 1-step) real vs. generated.
 
   * ACF of returns (should be ~0) and of squared returns (volatility clustering).
+
+COST.  Everything here is pooled over windows, so the generated sample is
+num_gen * n rows -- 1.2M at --gen 50000 --n 24 -- and the pair count is f(f-1)/2,
+which is 27966 at f = 237.  Two consequences drive the implementation:
+
+  * Pseudo-observations are computed ONCE per sample and reused.  Ranking inside
+    the pair loop, on the full (N, f) array, is O(N f log N) per pair and does not
+    terminate at these sizes.
+  * Pairs are screened with a single f x f indicator product and only the worst
+    `max_pairs` get full lambda(q) curves -- and only those are printed.  A report
+    with one line per pair is 27966 lines of log nobody reads.
+
+`max_rows` subsamples the pooled rows used for rank statistics; 200k rows leaves
+~4000 exceedances at q = 0.02, far more than the estimate needs.
 """
 
 from __future__ import annotations
@@ -27,14 +41,39 @@ from .evt import hill_estimator
 from .risk import var_cvar_empirical
 
 
-def _pool(windows: np.ndarray) -> np.ndarray:
-    """(M, n, f) -> (M*n, f)."""
+MAX_ROWS = 200_000
+MAX_PAIRS = 200
+
+
+def _pool(windows: np.ndarray, max_rows: int | None = None,
+          seed: int = 0) -> np.ndarray:
+    """(M, n, f) -> (M*n, f), optionally subsampled to `max_rows` rows."""
     w = np.asarray(windows, dtype=float)
-    return w.reshape(-1, w.shape[-1])
+    w = w.reshape(-1, w.shape[-1])
+    if max_rows is not None and w.shape[0] > max_rows:
+        rng = np.random.default_rng(seed)
+        w = w[np.sort(rng.choice(w.shape[0], max_rows, replace=False))]
+    return w
 
 
-def hill_table(real: np.ndarray, gen: np.ndarray, k_frac: float = 0.02) -> dict:
-    R, G = _pool(real), _pool(gen)
+def pseudo_obs(x: np.ndarray, chunk: int = 64) -> np.ndarray:
+    """(N, f) -> rank/(N+1) pseudo-observations, in column blocks to cap memory.
+
+    A whole-array double argsort on (200k, 237) allocates ~380 MB of int64 twice
+    over; 64-column blocks keep that near 100 MB at no meaningful cost in time.
+    """
+    x = np.asarray(x, dtype=float)
+    n, f = x.shape
+    u = np.empty((n, f), dtype=np.float32)
+    for a in range(0, f, chunk):
+        b = min(a + chunk, f)
+        u[:, a:b] = (np.argsort(np.argsort(x[:, a:b], axis=0), axis=0) + 1.0) / (n + 1.0)
+    return u
+
+
+def hill_table(real: np.ndarray, gen: np.ndarray, k_frac: float = 0.02,
+               max_rows: int | None = MAX_ROWS) -> dict:
+    R, G = _pool(real, max_rows), _pool(gen, max_rows)
     out = {}
     for j in range(R.shape[1]):
         out[j] = {t: (hill_estimator(R[:, j], k_frac, t),
@@ -43,35 +82,72 @@ def hill_table(real: np.ndarray, gen: np.ndarray, k_frac: float = 0.02) -> dict:
     return out
 
 
-def tail_dependence_curve(x: np.ndarray, i: int, j: int,
+def tail_dependence_curve(u: np.ndarray, i: int, j: int,
                           q_grid: np.ndarray, tail: str = "lower") -> np.ndarray:
-    """Empirical lambda(q) for features (i, j) of pooled data x: (N, f)."""
-    x = np.asarray(x, dtype=float)
-    N = x.shape[0]
-    u = (np.argsort(np.argsort(x, axis=0), axis=0) + 1.0) / (N + 1.0)
+    """Empirical lambda(q) for one pair, from PSEUDO-OBSERVATIONS u: (N, f).
+
+    Takes u rather than the raw data on purpose: ranking is the expensive step and
+    it does not depend on the pair, so callers rank once with pseudo_obs() and pass
+    the result in.
+    """
     ui, uj = (u[:, i], u[:, j]) if tail == "lower" else (1.0 - u[:, i], 1.0 - u[:, j])
     return np.array([np.mean((ui < q) & (uj < q)) / q for q in q_grid])
 
 
+def tail_dependence_matrix(u: np.ndarray, q: float,
+                           tail: str = "lower") -> np.ndarray:
+    """All f(f-1)/2 values of lambda_hat(q) at once, as one f x f matrix.
+
+        Lambda(q) = B^T B / (q N),      B_tj = 1{U_tj < q}
+
+    i.e. a single BLAS call instead of a loop over pairs.
+    """
+    v = u if tail == "lower" else 1.0 - u
+    b = (v < q).astype(np.float32)
+    return (b.T @ b) / (q * b.shape[0])
+
+
 def tail_dependence_report(real: np.ndarray, gen: np.ndarray,
                            q_grid: np.ndarray | None = None,
-                           tail: str = "lower") -> dict:
+                           tail: str = "lower",
+                           max_pairs: int | None = MAX_PAIRS,
+                           max_rows: int | None = MAX_ROWS,
+                           seed: int = 0) -> dict:
+    """{(i, j): (lambda_real(q_grid), lambda_gen(q_grid))} for the worst pairs.
+
+    Pairs are ranked by |lambda_gen(q0) - lambda_real(q0)| at the largest q on the
+    grid -- one f x f indicator product per sample -- and only the top `max_pairs`
+    get full curves.  max_pairs=None restores every pair, which is O(f^2) curves
+    and only tractable for small f.
+    """
     if q_grid is None:
         q_grid = np.linspace(0.01, 0.10, 10)
-    R, G = _pool(real), _pool(gen)
-    f = R.shape[1]
+    q_grid = np.asarray(q_grid, dtype=float)
+    uR = pseudo_obs(_pool(real, max_rows, seed))
+    uG = pseudo_obs(_pool(gen, max_rows, seed))
+    f = uR.shape[1]
+
+    q0 = float(q_grid.max())
+    D = np.abs(tail_dependence_matrix(uG, q0, tail)
+               - tail_dependence_matrix(uR, q0, tail))
+    iu = np.triu_indices(f, 1)
+    order = np.argsort(-D[iu])
+    if max_pairs is not None:
+        order = order[:max_pairs]
+
     out = {"q_grid": q_grid}
-    for i in range(f):
-        for j in range(i + 1, f):
-            out[(i, j)] = (tail_dependence_curve(R, i, j, q_grid, tail),
-                           tail_dependence_curve(G, i, j, q_grid, tail))
+    for k in order:
+        i, j = int(iu[0][k]), int(iu[1][k])
+        out[(i, j)] = (tail_dependence_curve(uR, i, j, q_grid, tail),
+                       tail_dependence_curve(uG, i, j, q_grid, tail))
     return out
 
 
 def marginal_risk_table(real: np.ndarray, gen: np.ndarray,
-                        alphas=(0.95, 0.99, 0.995)) -> dict:
+                        alphas=(0.95, 0.99, 0.995),
+                        max_rows: int | None = MAX_ROWS) -> dict:
     """Per-feature 1-step VaR/CVaR of the loss -x, real vs. generated."""
-    R, G = _pool(real), _pool(gen)
+    R, G = _pool(real, max_rows), _pool(gen, max_rows)
     out = {}
     for j in range(R.shape[1]):
         out[j] = {a: (var_cvar_empirical(-R[:, j], a), var_cvar_empirical(-G[:, j], a))
@@ -88,26 +164,29 @@ def acf(x: np.ndarray, max_lag: int = 10) -> np.ndarray:
                      for k in range(1, max_lag + 1)])
 
 
-def print_report(real: np.ndarray, gen: np.ndarray, feature_names=None) -> None:
+def print_report(real: np.ndarray, gen: np.ndarray, feature_names=None,
+                 max_pairs: int = 30, max_rows: int | None = MAX_ROWS) -> None:
     f = real.shape[-1]
     names = feature_names or [f"feat{j}" for j in range(f)]
 
     print("\n=== Hill tail index (smaller = heavier; gen should match real) ===")
-    for j, d in hill_table(real, gen).items():
+    for j, d in hill_table(real, gen, max_rows=max_rows).items():
         for t in ("lower", "upper"):
             r, g = d[t]
             print(f"  {names[j]:>8s} {t:>5s}:  real {r:6.2f}   gen {g:6.2f}")
 
-    print("\n=== Lower tail dependence lambda_L(q=0.02) per pair ===")
-    td = tail_dependence_report(real, gen, q_grid=np.array([0.02]))
-    for key, val in td.items():
-        if key == "q_grid":
-            continue
-        i, j = key
-        print(f"  ({names[i]},{names[j]}):  real {val[0][0]:.3f}   gen {val[1][0]:.3f}")
+    n_pairs = f * (f - 1) // 2
+    print(f"\n=== Lower tail dependence lambda_L(q=0.02): worst "
+          f"{min(max_pairs, n_pairs)} of {n_pairs} pairs by |gen - real| ===")
+    td = tail_dependence_report(real, gen, q_grid=np.array([0.02]),
+                                max_pairs=max_pairs, max_rows=max_rows)
+    rows = [(k, v) for k, v in td.items() if k != "q_grid"]
+    for (i, j), val in rows:
+        print(f"  ({names[i]},{names[j]}):  real {val[0][0]:.3f}   "
+              f"gen {val[1][0]:.3f}   diff {val[1][0] - val[0][0]:+.3f}")
 
     print("\n=== Marginal 1-step VaR / CVaR of loss (-x) ===")
-    for j, d in marginal_risk_table(real, gen).items():
+    for j, d in marginal_risk_table(real, gen, max_rows=max_rows).items():
         for a, ((vr, cr), (vg, cg)) in d.items():
             print(f"  {names[j]:>8s} a={a:5.3f}:  VaR real {vr:8.4f} gen {vg:8.4f}"
                   f"  |  CVaR real {cr:8.4f} gen {cg:8.4f}")
