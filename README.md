@@ -1,19 +1,19 @@
 ```bash
 
-if not torch.isfinite(loss):
-            with torch.no_grad():
-                pred = model(xt, t)
-            print(f"\n  step {step}: NON-FINITE LOSS")
-            for nm, v in (("x0", x0), ("x1", x1), ("xt", xt), ("pred", pred)):
-                fin = v[torch.isfinite(v)]
-                print(f"    {nm:4s} max|.| {fin.abs().max():.4g}  "
-                      f"non-finite {int((~torch.isfinite(v)).sum())}")
-            print(f"    t range [{t.min():.6f}, {t.max():.6f}]")
-            bad = [n for n, p in model.named_parameters()
-                   if not torch.isfinite(p).all()]
-            print(f"    non-finite params: {bad[:5] or 'none'}")
-            opt.zero_grad(set_to_none=True)
-            continue
-
+python -c "
+import numpy as np, pickle
+from csvio import load_returns
+m = pickle.load(open('runs/dim512_200feat/marginals.pkl','rb'))
+r = load_returns('data/returns.csv', False)
+z = m.transform(r[:int(0.8*len(r))])
+print('nu =', m.nu_, ' max|z| =', np.abs(z).max())
+mx = np.abs(z).max(axis=0)
+o = np.argsort(-mx)[:10]
+print('worst columns by max|z|:', [(int(j), round(float(mx[j]),1)) for j in o])
+xi = [(mm.xi_lo_, mm.xi_hi_) for mm in m.marginals_]
+lo = np.array([a for a,_ in xi]); hi = np.array([b for _,b in xi])
+print('xi_lower: max %.3f  n>0.5: %d' % (lo.max(), (lo>0.5).sum()))
+print('xi_upper: max %.3f  n>0.5: %d' % (hi.max(), (hi>0.5).sum()))
+"
 
 ```
