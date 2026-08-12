@@ -82,7 +82,8 @@ def parse_args():
     ap.add_argument("--n", type=int, default=24, help="window length")
     ap.add_argument("--stride", type=int, default=1)
     ap.add_argument("--test-frac", type=float, default=0.2)
-    ap.add_argument("--q-tail", type=float, default=0.05)
+    ap.add_argument("--q-tail", default="0.05",
+                    help="float, or 'auto' for per-feature threshold selection")
     ap.add_argument("--steps", type=int, default=20_000)
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--d-model", type=int, default=128)
@@ -123,7 +124,8 @@ def run(args):
     assert w.size == f, "--weights length must equal the number of features"
 
     # -------------------------------------------------- EVT marginals + PIT
-    marg = MarginalEnsemble(q_tail=args.q_tail, nu="auto").fit(real)
+    q_tail = args.q_tail if args.q_tail == "auto" else float(args.q_tail)
+    marg = MarginalEnsemble(q_tail=q_tail, nu="auto").fit(real)
     xi_lo = [round(m.xi_lo_, 3) for m in marg.marginals_]
     print(f"EVT: nu={marg.nu_:.2f}, xi_lower={xi_lo}  "
           f"(daily equities typically ~0.1-0.4; >~0.5 => check data/threshold)")
