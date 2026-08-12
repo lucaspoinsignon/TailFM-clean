@@ -76,9 +76,9 @@ Rank correlation, eigenvalue spectrum with effective rank, distribution of
 python 04_analyse.py --data data/returns.csv --out fig/dependence.png
 ```
 ## Analyze marginals
-
+the --marginals runs/dim512_200feat/marginals.pkl is if we want to take the amerginals we already have 
 ```bash
-python -m evtdiag.ks   --data data/returns.csv --out fig/ks.png
+python -m evtdiag.ks   --data data/returns.csv --out fig/ks.png --marginals runs/dim512_200feat/marginals.pkl
 python -m evtdiag.hill --data data/returns.csv --out fig/hill.png
 
 ```
