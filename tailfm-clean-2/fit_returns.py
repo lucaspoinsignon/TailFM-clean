@@ -110,6 +110,14 @@ def parse_args():
     ap.add_argument("--no-recalibrate", action="store_true",
                     help="disable rank-recalibration of generated marginals")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--no-figures", action="store_true",
+                    help="skip save_all_figures.  The PNGs are the only part of a "
+                         "run that nothing downstream reads: 05_diagnose.py and "
+                         "06_compare.py need generated_windows.npy alone.  Useful "
+                         "for a sweep -- draw figures afterwards for the winner.")
+    ap.add_argument("--no-report", action="store_true",
+                    help="skip print_report (Hill / tail dependence / VaR / ACF "
+                         "tables).  Same rationale: nothing downstream reads them.")
     ap.add_argument("--outdir", type=str, default="run_out")
     ap.add_argument("--log", type=str, default=None,
                     help="text file receiving a copy of everything printed "
@@ -186,7 +194,8 @@ def run(args):
     np.save(f"{args.outdir}/generated_windows.npy", gen)
 
     # ------------------------------------------------------------ diagnostics
-    print_report(real, gen, feature_names=names)
+    if not args.no_report:
+        print_report(real, gen, feature_names=names)
 
     # ------------------------------------------------------------ risk report
     report = estimate_risk(gen, alphas=alphas, weights=w, horizon=args.horizon,
@@ -205,11 +214,12 @@ def run(args):
 
     # ----------------------------------------------------------------- figures
     # One PNG per diagnostic, same conventions as run_baselines.py (figures.py).
-    paths = save_all_figures(real, {"tailfm": gen}, names, args.outdir,
-                             weights=w, horizon=args.horizon)
+    paths = ([] if args.no_figures else
+             save_all_figures(real, {"tailfm": gen}, names, args.outdir,
+                              weights=w, horizon=args.horizon))
     print(f"\nSaved: {args.outdir}/{{model_ema.pt, marginals.pkl, "
-          f"generated_windows.npy}}, "
-          + ", ".join(os.path.basename(p) for p in paths))
+          f"generated_windows.npy}}"
+          + ("" if not paths else ", " + ", ".join(os.path.basename(p) for p in paths)))
 
 
 def main():
