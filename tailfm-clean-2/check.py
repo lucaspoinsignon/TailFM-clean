@@ -64,6 +64,12 @@ def main():
     p.add_argument("--q-tail", default="0.05",
                    help="float, or 'auto' for per-feature threshold selection; "
                         "must match fit_returns.py --q-tail")
+    p.add_argument("--nu", default="5.0",
+                   help="t_nu latent space, or 'auto'; must match fit_returns.py")
+    p.add_argument("--no-shrink", action="store_true",
+                   help="disable empirical-Bayes pooling of xi (match fit_returns)")
+    p.add_argument("--shrink-c", type=float, default=1.0,
+                   help="Efron-Morris limited-translation cap, in standard errors")
     p.add_argument("--n-boot", type=int, default=99,
                    help="bootstrap replicates for the auto goodness-of-fit test")
     p.add_argument("--test-frac", type=float, default=0.2)
@@ -72,7 +78,9 @@ def main():
                    help="skip the actual genpareto fits (structure checks only)")
     a = p.parse_args()
     q_tail = a.q_tail if a.q_tail == "auto" else float(a.q_tail)
-    print(f"checking {a.data}  (--prices={a.prices}, q_tail={q_tail})\n")
+    nu = a.nu if a.nu == "auto" else float(a.nu)
+    print(f"checking {a.data}  (--prices={a.prices}, q_tail={q_tail}, nu={nu}, "
+          f"shrink={'off' if a.no_shrink else f'c={a.shrink_c}'})\n")
 
     # ---- header -------------------------------------------------------------
     # Load the raw columns first (prices=False never takes a log), so a
@@ -140,15 +148,20 @@ def main():
     # destroys training, and only fitting reveals it.
     print("\nEVT: fitting marginals on the training rows")
     from tailfm.evt import MarginalEnsemble
+    from evt_shrink import shrink_ensemble
     try:
-        marg = MarginalEnsemble(q_tail=q_tail, nu="auto",
-                                n_boot=a.n_boot).fit(tr)
+        marg = MarginalEnsemble(q_tail=q_tail, nu=nu, n_boot=a.n_boot).fit(tr)
     except ValueError as e:
         fail(str(e))
         print(f"\n{'-' * 60}\nFAILED: fit_returns.py will raise on this file.")
         sys.exit(1)
-    su = marg.summary()
     ok(f"{2 * f} GPD fits succeeded  (nu = {marg.nu_:.3f})")
+    if not a.no_shrink:
+        # Same pooling fit_returns.py applies, so this gate validates the
+        # marginals the model is actually trained on.
+        print("    pooling xi across features (empirical Bayes):")
+        shrink_ensemble(marg, tr, c=a.shrink_c)
+    su = marg.summary()
 
     if q_tail == "auto":
         for side in ("lo", "hi"):
