@@ -142,7 +142,7 @@ def exceedances(m, x_col: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def shrink_ensemble(marg, x: np.ndarray, refit: bool = True, c: float = 1.0,
-                    verbose: bool = True) -> dict:
+                    xi_min: float | None = 0.0, verbose: bool = True) -> dict:
     """Re-estimate and pool the tails of a fitted MarginalEnsemble, in place.
 
     x is the SAME array passed to marg.fit -- the thresholds u_lo_/u_hi_ are
@@ -169,6 +169,23 @@ def shrink_ensemble(marg, x: np.ndarray, refit: bool = True, c: float = 1.0,
     new_lo, lam_lo, mu_lo, tau2_lo = eb_shrink_xi(xi_lo, k_lo, c)
     new_hi, lam_hi, mu_hi, tau2_hi = eb_shrink_xi(xi_hi, k_hi, c)
 
+    # SHAPE FLOOR.  xi < 0 gives the GPD a finite endpoint u -+ beta/|xi|, and the
+    # MLE puts that endpoint essentially at the extreme training observation.  A
+    # held-out value past it gets F_hat = 0, which cdf() clips to _EPS, and the PIT
+    # returns |z| = |t_nu^{-1}(1e-12)| -- 394 at nu=5.  Shrinkage cannot repair
+    # this: the displacement is capped at c standard errors by construction, so a
+    # feature at xi = -0.45 never crosses zero however c is tuned.  Flooring xi at
+    # 0 makes the tail exponential and therefore unbounded, so no future
+    # observation can fall outside the support.  This is the OPPOSITE of evt.py's
+    # xi_max: capping xi from above hides a real finding about a heavy instrument,
+    # whereas a hard floor on the losses of a daily-marked traded instrument is a
+    # claim the held-out data has already contradicted.  xi_min=None disables it.
+    n_floor = 0
+    if xi_min is not None:
+        n_floor = int((new_lo < xi_min).sum() + (new_hi < xi_min).sum())
+        new_lo = np.maximum(new_lo, xi_min)
+        new_hi = np.maximum(new_hi, xi_min)
+
     for j, m in enumerate(m_list):
         m.xi_lo_, m.beta_lo_ = float(new_lo[j]), beta_profile(exc[j][0], new_lo[j])
         m.xi_hi_, m.beta_hi_ = float(new_hi[j]), beta_profile(exc[j][1], new_hi[j])
@@ -187,4 +204,8 @@ def shrink_ensemble(marg, x: np.ndarray, refit: bool = True, c: float = 1.0,
                   f"  mean lambda={lam.mean():.2f}"
                   f"  (range {xi_r.min():+.3f},{xi_r.max():+.3f}"
                   f" -> {xi_s.min():+.3f},{xi_s.max():+.3f})")
+        if xi_min is not None:
+            print(f"  shape floor xi >= {xi_min:+.2f} applied to {n_floor} of "
+                  f"{2 * f} tails (finite GPD endpoint removed)")
+    out["n_floor"] = n_floor
     return out
