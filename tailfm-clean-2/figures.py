@@ -42,8 +42,25 @@ import matplotlib.pyplot as plt
 from tailfm import portfolio_losses
 
 REAL_KW = dict(color="k", lw=2)                 # the real sample, everywhere
-MAX_PAIRS = 200                                 # tail-dependence panels, worst-first
+MAX_PAIRS = 30                                  # tail-dependence panels, worst-first
 MAX_ROWS = 200_000                              # rows used for the rank statistics
+MAX_FEATURES = 12                               # per-feature panels (qq, densities)
+
+# PANEL COUNT.  qq_figure and empirical_distribution_figure allocate one panel per
+# feature.  At f = 235 that is a 2058 x 47558 px canvas for the QQ grid and a
+# 177660 x 1148 px canvas for the densities -- the latter exceeds matplotlib's
+# hard 2**16 px limit and raises, killing the run after training and generation
+# have already been paid for.  Both now show only the `max_features` features with
+# the heaviest empirical lower tail (largest 1% loss quantile), which are the ones
+# a tail model is judged on; max_features=None restores one panel per feature.
+
+
+def _worst_features(real, k):
+    """Indices of the k features with the most extreme empirical 1% loss."""
+    R = real.reshape(-1, real.shape[-1])
+    if k is None or R.shape[1] <= k:
+        return list(range(R.shape[1]))
+    return sorted(np.argsort(-np.quantile(-R, 0.99, axis=0))[:k].tolist())
 
 
 def model_colors(gens: dict) -> dict:
@@ -107,7 +124,8 @@ def _lambda_curve(u: np.ndarray, i: int, j: int, q_grid, tail: str) -> np.ndarra
 
 
 # --------------------------------------------------------------------- QQ
-def qq_figure(real, gens, names, path, q_lo=0.001, q_hi=0.05, n_q=150):
+def qq_figure(real, gens, names, path, q_lo=0.001, q_hi=0.05, n_q=150,
+              max_features: int | None = MAX_FEATURES):
     """Lower-tail QQ plots: one panel per feature, plus one with features pooled.
 
     Points below the 45-degree line mean the generated lower quantile is more
@@ -119,10 +137,13 @@ def qq_figure(real, gens, names, path, q_lo=0.001, q_hi=0.05, n_q=150):
     G = {name: gen.reshape(-1, f) for name, gen in gens.items()}
     ql = np.linspace(q_lo, q_hi, n_q)
 
-    panels = [(names[j], R[:, j], {k: g[:, j] for k, g in G.items()})
-              for j in range(f)]
+    sel = _worst_features(real, max_features)
+    panels = [(names[j], R[:, j], {k: g[:, j] for k, g in G.items()}) for j in sel]
     if f > 1:
-        panels.append(("pooled features", R, {k: g for k, g in G.items()}))
+        # Pooled panel on a subsample: np.quantile over the full (M*n, f) array
+        # sorts 2.3 GB at --gen 50000 and adds nothing the subsample does not.
+        panels.append(("pooled features", _subsample(R, MAX_ROWS),
+                       {k: _subsample(g, MAX_ROWS) for k, g in G.items()}))
 
     nrow, ncol = _grid(len(panels))
     fig, axes = plt.subplots(nrow, ncol, figsize=(4.9 * ncol, 4.3 * nrow),
@@ -225,17 +246,20 @@ def portfolio_survival_figure(real, gens, path, weights=None, horizon=10,
 
 
 # -------------------------------------------- per-feature marginal picture
-def empirical_distribution_figure(real, gens, names, path):
+def empirical_distribution_figure(real, gens, names, path,
+                                  max_features: int | None = MAX_FEATURES):
     """Per feature: pooled 1-step density (log y) and loss survival P(-X > x)."""
     f = real.shape[-1]
     colors = model_colors(gens)
     R = real.reshape(-1, f)
     G = {name: gen.reshape(-1, f) for name, gen in gens.items()}
 
-    fig, axes = plt.subplots(2, f, figsize=(5.4 * f, 8.2), squeeze=False)
-    for j in range(f):
+    sel = _worst_features(real, max_features)
+    fig, axes = plt.subplots(2, len(sel), figsize=(5.4 * len(sel), 8.2),
+                             squeeze=False)
+    for col, j in enumerate(sel):
         # row 1: pooled 1-step empirical density on a log scale (both tails)
-        ax = axes[0][j]
+        ax = axes[0][col]
         lo = min(R[:, j].min(), *[g[:, j].min() for g in G.values()])
         hi = max(R[:, j].max(), *[g[:, j].max() for g in G.values()])
         bins = np.linspace(lo, hi, 120)
@@ -247,11 +271,11 @@ def empirical_distribution_figure(real, gens, names, path):
         ax.set_yscale("log")
         ax.set_title(f"{names[j]}: empirical density (log scale)")
         ax.set_xlabel("1-step return")
-        if j == 0:
+        if col == 0:
             ax.set_ylabel("density")
         ax.legend(fontsize=7)
         # row 2: 1-step loss survival P(-X > x), the lower tail head-on
-        ax = axes[1][j]
+        ax = axes[1][col]
         Lr, sr = _survival(-R[:, j])
         ax.semilogy(Lr, sr, label="real", **REAL_KW)
         xmax = Lr[-1]
@@ -263,7 +287,7 @@ def empirical_distribution_figure(real, gens, names, path):
         ax.set_ylim(1e-5, 1)
         ax.set_title(f"{names[j]}: loss survival P(-X > x)")
         ax.set_xlabel("loss x")
-        if j == 0:
+        if col == 0:
             ax.set_ylabel("P(-X > x)")
         ax.legend(fontsize=7)
     fig.tight_layout()
