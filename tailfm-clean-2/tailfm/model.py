@@ -67,11 +67,23 @@ class DiTBlock(nn.Module):
 
 class VelocityField(nn.Module):
     def __init__(self, f: int, n_max: int, d_model: int = 128,
-                 depth: int = 4, heads: int = 4, mlp_ratio: int = 4):
+                 depth: int = 4, heads: int = 4, mlp_ratio: int = 4,
+                 pos_std: float = 0.5):
         super().__init__()
         self.in_proj = nn.Linear(f, d_model)
         self.pos = nn.Parameter(torch.zeros(1, n_max, d_model))
-        nn.init.trunc_normal_(self.pos, std=0.02)
+        # POSITIONAL SCALE.  forward() does h = in_proj(x) + pos, and with nn.Linear's
+        # default init the entries of in_proj(x) have sd ~= 0.75 in z-space at f=235.
+        # The original std=0.02 therefore made position ~2.5% of the token signal,
+        # which LayerNorm then dilutes further.  Combined with a base that is
+        # exchangeable in t and adaLN-Zero starting the network at the identity, the
+        # model has almost no gradient pressure to break time-exchangeability -- and
+        # it did not: after 20k steps at std=0.02 the learned pos had std 0.0190
+        # (init 0.02) with the 17 interior steps SHRUNK below their initialisation,
+        # and the generated windows were statistically indistinguishable from real
+        # windows with the time axis randomly permuted.  std=0.5 puts position on the
+        # same scale as the projected input.  pos_std=0.02 restores the old runs.
+        nn.init.trunc_normal_(self.pos, std=pos_std)
         self.t_mlp = nn.Sequential(nn.Linear(d_model, d_model), nn.SiLU(),
                                    nn.Linear(d_model, d_model))
         self.blocks = nn.ModuleList(DiTBlock(d_model, heads, mlp_ratio)
