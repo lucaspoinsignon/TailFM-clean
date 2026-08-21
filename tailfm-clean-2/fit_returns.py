@@ -25,6 +25,7 @@ import pickle
 import numpy as np
 import torch
 
+from evt_shrink import shrink_ensemble
 from figures import save_all_figures
 from run_logging import tee_output
 from tailfm import (MarginalEnsemble, VelocityField, train_cfm, sample,
@@ -84,6 +85,18 @@ def parse_args():
     ap.add_argument("--test-frac", type=float, default=0.2)
     ap.add_argument("--q-tail", default="0.05",
                     help="float, or 'auto' for per-feature threshold selection")
+    ap.add_argument("--nu", default="5.0",
+                    help="degrees of freedom of the t_nu latent space, or 'auto' "
+                         "(Hill median).  The PIT makes every marginal exactly "
+                         "t_nu for ANY nu, so this is a design parameter, not an "
+                         "estimate: nu <= 4 gives the CFM target x1-x0 an "
+                         "infinite fourth moment and hence infinite-variance "
+                         "gradients.  nu=5 is the smallest value with E z^4 < inf.")
+    ap.add_argument("--no-shrink", action="store_true",
+                    help="disable empirical-Bayes pooling of the per-feature xi")
+    ap.add_argument("--shrink-c", type=float, default=1.0,
+                    help="Efron-Morris limited-translation cap, in standard "
+                         "errors; inf = unrestricted posterior mean")
     ap.add_argument("--steps", type=int, default=20_000)
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--d-model", type=int, default=128)
@@ -125,7 +138,17 @@ def run(args):
 
     # -------------------------------------------------- EVT marginals + PIT
     q_tail = args.q_tail if args.q_tail == "auto" else float(args.q_tail)
-    marg = MarginalEnsemble(q_tail=q_tail, nu="auto").fit(real)
+    nu = args.nu if args.nu == "auto" else float(args.nu)
+    # Fit on train_r, NOT on `real`: make_windows overlaps at stride 1, so every
+    # interior date appears n times in the pooled (N*n, f) array.  That leaves the
+    # MLE roughly unchanged but multiplies the exceedance count by ~n, which
+    # invalidates the goodness-of-fit bootstrap, breaks the (1+xi)^2/k variance
+    # used for pooling, and makes these marginals differ from the ones check.py
+    # and evtdiag.ks validate.
+    marg = MarginalEnsemble(q_tail=q_tail, nu=nu).fit(train_r)
+    if not args.no_shrink:
+        print("EVT: pooling xi across features (empirical Bayes)")
+        shrink_ensemble(marg, train_r, c=args.shrink_c)
     xi_lo = [round(m.xi_lo_, 3) for m in marg.marginals_]
     print(f"EVT: nu={marg.nu_:.2f}, xi_lower={xi_lo}  "
           f"(daily equities typically ~0.1-0.4; >~0.5 => check data/threshold)")
