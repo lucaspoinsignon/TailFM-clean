@@ -101,6 +101,20 @@ def parse_args():
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--d-model", type=int, default=128)
     ap.add_argument("--depth", type=int, default=4)
+    ap.add_argument("--mix-dim", default="window", choices=["window", "time"],
+                    help="which coordinates share the base mixing variable W; "
+                         "only used when --mix-phi is not given")
+    ap.add_argument("--mix-phi", type=float, default=0.8,
+                    help="AR(1) coefficient coupling W_t across timesteps.  1.0 = one "
+                         "W per window (old --mix-dim window), 0.0 = independent per "
+                         "step (old --mix-dim time); BOTH endpoints give a "
+                         "within-window squared-return ACF of exactly the iid null.  "
+                         "0.8 maximises the clustering the base donates.  Pass a "
+                         "negative value to fall back to --mix-dim.")
+    ap.add_argument("--pos-std", type=float, default=0.5,
+                    help="init scale of the learned positional embedding.  0.02 (the "
+                         "old value) is ~2.5%% of the projected-input scale and left "
+                         "the model time-exchangeable; 0.5 matches it.")
     ap.add_argument("--gen", type=int, default=50_000, help="# generated windows")
     ap.add_argument("--ode-steps", type=int, default=100)
     ap.add_argument("--horizon", type=int, default=10)
@@ -163,15 +177,20 @@ def run(args):
     z = torch.tensor(marg.transform(real), dtype=torch.float32)
 
     # --------------------------------------------------------------- training
-    model = VelocityField(f=f, n_max=args.n, d_model=args.d_model, depth=args.depth)
+    mix_phi = None if args.mix_phi is not None and args.mix_phi < 0 else args.mix_phi
+    print(f"base: mix_dim={args.mix_dim}  mix_phi={mix_phi}  pos_std={args.pos_std}")
+    model = VelocityField(f=f, n_max=args.n, d_model=args.d_model, depth=args.depth,
+                          pos_std=args.pos_std)
     ema, _ = train_cfm(model, z, nu=marg.nu_, steps=args.steps,
-                       batch_size=args.batch, device=device, seed=args.seed)
+                       batch_size=args.batch, mix_dim=args.mix_dim, mix_phi=mix_phi,
+                       device=device, seed=args.seed)
     torch.save(ema.shadow.state_dict(), f"{args.outdir}/model_ema.pt")
     pickle.dump(marg, open(f"{args.outdir}/marginals.pkl", "wb"))
 
     # --------------------------------------------------------------- sampling
     z_gen = sample(ema.shadow, args.gen, args.n, f, nu=marg.nu_,
-                   n_steps=args.ode_steps, device=device, seed=args.seed)
+                   n_steps=args.ode_steps, mix_dim=args.mix_dim, mix_phi=mix_phi,
+                   device=device, seed=args.seed)
     gen = marg.inverse_transform(z_gen.numpy())
     del z_gen                       # 1.13 GB at --gen 50000; held through diagnostics
     if not args.no_recalibrate:
