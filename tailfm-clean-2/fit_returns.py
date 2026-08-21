@@ -165,16 +165,23 @@ def run(args):
     z_gen = sample(ema.shadow, args.gen, args.n, f, nu=marg.nu_,
                    n_steps=args.ode_steps, device=device, seed=args.seed)
     gen = marg.inverse_transform(z_gen.numpy())
+    del z_gen                       # 1.13 GB at --gen 50000; held through diagnostics
     if not args.no_recalibrate:
         # Rank-recalibration: replace each feature's pooled marginal by exactly F_hat_j
         # via the increasing map x -> F_hat_j^{-1}(rank/(K+1)). Leaves the learned copula
         # invariant (Sklar), so the flow keeps only the dependence while the EVT
         # marginals keep the tails -- restoring the marginal guarantee exactly.
-        from scipy import stats as _st
         flat = gen.reshape(-1, f)
-        for j in range(f):
-            u = _st.rankdata(flat[:, j], method="average") / (flat.shape[0] + 1.0)
-            flat[:, j] = marg.marginals_[j].ppf(u)
+        K = flat.shape[0]
+        rank = np.arange(1, K + 1, dtype=float) / (K + 1.0)
+        for a in range(0, f, 32):                      # column blocks, cache-friendly
+            b = min(a + 32, f)
+            blk = np.ascontiguousarray(flat[:, a:b].T)
+            idx = np.argsort(blk, axis=1)
+            u = np.empty(blk.shape)
+            np.put_along_axis(u, idx, np.broadcast_to(rank, blk.shape), axis=1)
+            for j in range(a, b):
+                flat[:, j] = marg.marginals_[j].ppf(u[j - a])
         gen = flat.reshape(args.gen, args.n, f)
     np.save(f"{args.outdir}/generated_windows.npy", gen)
 
