@@ -1,22 +1,14 @@
 ```bash
 
+cd /repos/quail
+for PS in 0.1 0.2 0.3; do
+  python fit_returns.py --data data/returns_clean.csv --nu 5 --q-tail 0.05 \
+      --n 24 --test-frac 0.2 --horizon 10 --seed 0 --steps 20000 --gen 20000 \
+      --d-model 512 --ode-steps 100 --mix-phi 1.0 --pos-std $PS \
+      --no-figures --no-report --outdir runs/ps$PS
+done
 python summarize_runs.py --data data/returns_clean.csv \
-    runs/nu5 runs/nu5_phi08 runs/nu5_phi095 \
-    runs/ab_old runs/ab_pos runs/ab_phi runs/ab_both
-
-
-python -c "
-import numpy as np
-from csvio import load_returns
-from tailfm import make_windows
-from tailfm.evaluate import acf
-r = load_returns('data/returns_clean.csv', False)
-real = make_windows(r[:int(0.8*len(r))], 24, 1)
-A = lambda W: np.array([acf(W[:,:,j]**2,3) for j in range(W.shape[2])]).mean(0)+1/23
-print('real          ', np.round(A(real),4))
-for nm in ('nu5','nu5_phi08','nu5_phi095'):
-    print(f'{nm:14s}', np.round(A(np.load(f'runs/{nm}/generated_windows.npy')),4))
-"
+    runs/ab_old runs/ps0.1 runs/ps0.2 runs/ps0.3 runs/ab_pos runs/ab_both
 
 
 
