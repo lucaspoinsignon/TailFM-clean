@@ -6,7 +6,7 @@ Pipeline: EVT marginal PIT (evt) -> CFM with Student-t base (base, model, cfm)
 """
 
 from .evt import MarginalEnsemble, SemiParametricMarginal, hill_estimator
-from .base import sample_base
+from .base import sample_base, resolve_phi
 from .model import VelocityField
 from .cfm import train_cfm, sample, EMA
 from .risk import estimate_risk, kupiec_test, portfolio_losses, var_cvar_empirical, var_cvar_gpd
